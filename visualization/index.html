@@ -1,0 +1,212 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>IoT RGB Sound Visualizer</title>
+<script src="https://cdn.socket.io/4.0.1/socket.io.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body{font-family:Arial,sans-serif;margin:20px}
+button{padding:8px 16px;margin:4px;cursor:pointer}
+input,select{padding:6px;margin:4px}
+.status{background:#eee;padding:12px;width:850px;margin-top:10px}
+.tabs button{padding:10px 18px}
+.tab{display:none;margin-top:20px}
+.active{display:block}
+pre{background:#f1f1f1;padding:12px;max-height:280px;overflow:auto;width:850px}
+canvas{margin-top:10px}
+</style>
+</head>
+<body>
+
+<h1>IoT RGB Sound Visualizer System</h1>
+
+<h2>System control</h2>
+<button onclick="openSystem()">Open</button>
+<button onclick="startMonitoring()">Start</button>
+<button onclick="stopMonitoring()">Stop</button>
+<button onclick="closeSystem()">Close</button>
+
+<div class="status">
+<b>Status:</b> <span id="statusText">not loaded</span><br>
+<b>Session:</b> <span id="sessionText">0</span><br>
+<b>Message:</b> <span id="messageText">waiting...</span><br>
+<b>Serial port:</b> <span id="portText">/dev/ttyUSB0</span>
+</div>
+
+<h2>Monitoring / control parameters</h2>
+<label>Sensitivity:</label>
+<input type="number" id="sensitivity" step="0.1" value="1.0">
+<label>Brightness:</label>
+<input type="number" id="brightness" min="0" max="255" value="200">
+<label>Mode:</label>
+<select id="mode">
+<option>Sound monitor</option>
+<option>LED visualizer</option>
+<option>Calibration</option>
+<option>0</option><option>1</option><option>2</option><option>3</option><option>4</option>
+<option>5</option><option>6</option><option>7</option><option>8</option>
+</select>
+<button onclick="saveParameters()">Save parameters</button>
+
+<div class="tabs">
+<br>
+<button onclick="openTab('numericTab')">1. Numeric data</button>
+<button onclick="openTab('graphTab')">2. Live graphs</button>
+<button onclick="openTab('gaugeTab')">3. Gauges</button>
+<button onclick="openTab('dbTab')">4. Database archive</button>
+<button onclick="openTab('csvTab')">5. File archive</button>
+</div>
+
+<div id="numericTab" class="tab active">
+<h2>Live numerical output</h2>
+<pre id="liveOutput">Press Open and Start...</pre>
+</div>
+
+<div id="graphTab" class="tab">
+<h2>Live graph</h2>
+<canvas id="liveChart" width="900" height="400"></canvas>
+</div>
+
+<div id="gaugeTab" class="tab">
+<h2>Analog gauges</h2>
+<canvas id="soundGauge" width="430" height="260"></canvas>
+<h3 id="soundGaugeValue">Sound = 0</h3>
+<canvas id="freqGauge" width="430" height="260"></canvas>
+<h3 id="freqGaugeValue">Freq input = 0</h3>
+</div>
+
+<div id="dbTab" class="tab">
+<h2>SQLite database archive</h2>
+<button onclick="loadSessions()">Load sessions</button>
+<pre id="sessionsOutput">No sessions loaded.</pre>
+<label>Session ID:</label>
+<input type="number" id="dbSessionId" value="1">
+<button onclick="loadDatabaseSession()">Load from database</button>
+<h3>Numerical output from database</h3>
+<pre id="dbOutput">No database session loaded.</pre>
+<h3>Graph from database</h3>
+<canvas id="dbChart" width="900" height="400"></canvas>
+</div>
+
+<div id="csvTab" class="tab">
+<h2>CSV file archive</h2>
+<label>Session ID:</label>
+<input type="number" id="csvSessionId" value="1">
+<button onclick="loadCsvSession()">Load from CSV file</button>
+<h3>Numerical output from file</h3>
+<pre id="csvOutput">No CSV session loaded.</pre>
+<h3>Graph from file</h3>
+<canvas id="csvChart" width="900" height="400"></canvas>
+</div>
+
+<script>
+var socket=io({transports:['polling']});
+var sampleCounter=0;
+
+function openTab(id){
+  var tabs=document.getElementsByClassName("tab");
+  for(var i=0;i<tabs.length;i++)tabs[i].classList.remove("active");
+  document.getElementById(id).classList.add("active");
+}
+function apiPost(url,data={}){
+  return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)}).then(r=>r.json());
+}
+function setMessage(t){document.getElementById("messageText").innerHTML=t;}
+function updateStatus(){
+ fetch("/status").then(r=>r.json()).then(d=>{
+  document.getElementById("statusText").innerHTML="opened="+d.opened+", monitoring="+d.monitoring;
+  document.getElementById("sessionText").innerHTML=d.session_id;
+  document.getElementById("portText").innerHTML=d.port;
+ });
+}
+function openSystem(){apiPost("/open").then(d=>{setMessage(d.message);updateStatus();});}
+function startMonitoring(){apiPost("/start").then(d=>{setMessage(d.message);updateStatus();});}
+function stopMonitoring(){apiPost("/stop").then(d=>{setMessage(d.message);updateStatus();loadSessions();});}
+function closeSystem(){apiPost("/close").then(d=>{setMessage(d.message);updateStatus();});}
+function saveParameters(){
+ var data={sensitivity:document.getElementById("sensitivity").value,brightness:document.getElementById("brightness").value,mode:document.getElementById("mode").value};
+ apiPost("/parameters",data).then(d=>setMessage(d.message));
+}
+function createChart(canvasId,title){
+ var ctx=document.getElementById(canvasId).getContext("2d");
+ return new Chart(ctx,{type:"line",data:{labels:[],datasets:[
+  {label:"sound",data:[],borderWidth:2,fill:false,tension:0.1},
+  {label:"normalized sound",data:[],borderWidth:2,fill:false,tension:0.1},
+  {label:"freq",data:[],borderWidth:2,fill:false,tension:0.1}
+ ]},options:{responsive:false,animation:false,plugins:{title:{display:true,text:title}},scales:{x:{title:{display:true,text:"sample"}},y:{title:{display:true,text:"value"}}}}});
+}
+var liveChart=createChart("liveChart","Live Arduino data");
+var dbChart=createChart("dbChart","Database session");
+var csvChart=createChart("csvChart","CSV session");
+
+function clearChart(chart){
+ chart.data.labels=[];
+ chart.data.datasets[0].data=[];
+ chart.data.datasets[1].data=[];
+ chart.data.datasets[2].data=[];
+ chart.update();
+}
+function fillChart(chart,points){
+ chart.data.labels=points.map(p=>p.x);
+ chart.data.datasets[0].data=points.map(p=>p.sound);
+ chart.data.datasets[1].data=points.map(p=>p.normalized_sound);
+ chart.data.datasets[2].data=points.map(p=>p.freq);
+ chart.update();
+}
+function drawGauge(canvasId,valueId,value,label){
+ var canvas=document.getElementById(canvasId),ctx=canvas.getContext("2d");
+ var cx=215,cy=210,radius=160,maxValue=1023;
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+ ctx.beginPath();ctx.arc(cx,cy,radius,Math.PI,2*Math.PI);ctx.lineWidth=4;ctx.stroke();
+ for(var i=0;i<=10;i++){
+  var angle=Math.PI+(i/10)*Math.PI;
+  var x1=cx+Math.cos(angle)*(radius-10),y1=cy+Math.sin(angle)*(radius-10);
+  var x2=cx+Math.cos(angle)*radius,y2=cy+Math.sin(angle)*radius;
+  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+  var tx=cx+Math.cos(angle)*(radius-40),ty=cy+Math.sin(angle)*(radius-40);
+  ctx.fillText(i*100,tx-12,ty+4);
+ }
+ if(value<0)value=0;if(value>maxValue)value=maxValue;
+ var a=Math.PI+(value/maxValue)*Math.PI;
+ var nx=cx+Math.cos(a)*(radius-45),ny=cy+Math.sin(a)*(radius-45);
+ ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(nx,ny);ctx.lineWidth=4;ctx.stroke();
+ ctx.beginPath();ctx.arc(cx,cy,7,0,2*Math.PI);ctx.fill();
+ document.getElementById(valueId).innerHTML=label+" = "+value;
+}
+drawGauge("soundGauge","soundGaugeValue",0,"Sound");
+drawGauge("freqGauge","freqGaugeValue",0,"Freq input");
+
+socket.on("new_session",function(msg){
+ sampleCounter=0;clearChart(liveChart);
+ document.getElementById("liveOutput").innerHTML="New session: "+msg.session_id;
+});
+socket.on("newdata",function(msg){
+ sampleCounter++;
+ document.getElementById("liveOutput").innerHTML=JSON.stringify(msg,null,2)+"\n\n"+document.getElementById("liveOutput").innerHTML;
+ liveChart.data.labels.push(sampleCounter);
+ liveChart.data.datasets[0].data.push(msg.sound);
+ liveChart.data.datasets[1].data.push(msg.normalized_sound);
+ liveChart.data.datasets[2].data.push(msg.freq);
+ liveChart.update();
+ drawGauge("soundGauge","soundGaugeValue",msg.sound,"Sound");
+ drawGauge("freqGauge","freqGaugeValue",msg.freq,"Freq input");
+});
+socket.on("system_message",function(msg){setMessage(msg.message);});
+
+function loadSessions(){
+ fetch("/sessions").then(r=>r.json()).then(d=>{document.getElementById("sessionsOutput").innerHTML=JSON.stringify(d,null,2);});
+}
+function loadDatabaseSession(){
+ var id=document.getElementById("dbSessionId").value;
+ fetch("/session/"+id).then(r=>r.json()).then(d=>{document.getElementById("dbOutput").innerHTML=JSON.stringify(d,null,2);if(d.ok)fillChart(dbChart,d.data);});
+}
+function loadCsvSession(){
+ var id=document.getElementById("csvSessionId").value;
+ fetch("/csv_session/"+id).then(r=>r.json()).then(d=>{document.getElementById("csvOutput").innerHTML=JSON.stringify(d,null,2);if(d.ok)fillChart(csvChart,d.data);});
+}
+updateStatus();loadSessions();
+</script>
+</body>
+</html>
